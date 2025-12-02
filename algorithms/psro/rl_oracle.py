@@ -22,6 +22,7 @@ import numpy as np
 from open_spiel.python.algorithms.psro_v2  import optimization_oracle
 from open_spiel.python.algorithms.psro_v2  import utils
 from algorithms.ppo import ppo_wrapper
+from algorithms.fixppo import fixppo_wrapper
 
 
 def update_episodes_per_oracles(episodes_per_oracle, played_policies_indexes):
@@ -136,12 +137,14 @@ class RLOracle(optimization_oracle.AbstractOracle):
                 cumulative_rewards += np.array(time_step.rewards)
                 if isinstance(
                     agents[player_id]._policy, ppo_wrapper.PPOWrapper
+                ) or isinstance(
+                    agents[player_id]._policy, fixppo_wrapper.FIXPPOWrapper
                 ):  # self._best_response_kwargs['oracle_type'] == "ppo":
                     agents[player_id].post_step(time_step, is_evaluation)
 
         if not is_evaluation:
             # PPO needs to step
-            if isinstance(agents[player_id]._policy, ppo_wrapper.PPOWrapper):
+            if isinstance(agents[player_id]._policy, ppo_wrapper.PPOWrapper) or isinstance(agents[player_id]._policy, fixppo_wrapper.FIXPPOWrapper):
                 agents[1 - player_id].post_step(time_step, is_evaluation)
             else:
                 for agent in agents:

@@ -10,3 +10,4 @@ pixi.lock
 **/*.npy
 local/
 results/
+outputs/

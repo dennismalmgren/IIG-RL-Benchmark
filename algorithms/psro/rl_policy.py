@@ -26,6 +26,7 @@ from open_spiel.python import rl_environment
 from open_spiel.python.pytorch import dqn
 from open_spiel.python.pytorch import policy_gradient
 from algorithms.ppo import ppo_wrapper
+from algorithms.fixppo import fixppo_wrapper
 import copy
 # from open_spiel.python.algorithms import policy_gradient
 
@@ -123,7 +124,7 @@ def rl_policy_factory(rl_class):
         def post_step(self, time_step, is_evaluation):
             assert isinstance(
                 self._policy, ppo_wrapper.PPOWrapper
-            ), "Only PPO policies can be post-stepped."
+            ) or isinstance(self._policy, fixppo_wrapper.FIXPPOWrapper), "Only PPO policies can be post-stepped."
             if self._frozen or is_evaluation:
                 return
             self._policy.post_step(time_step)
@@ -172,6 +173,7 @@ def rl_policy_factory(rl_class):
 PGPolicy = rl_policy_factory(policy_gradient.PolicyGradient)
 DQNPolicy = rl_policy_factory(dqn.DQN)
 PPOPolicy = rl_policy_factory(ppo_wrapper.PPOWrapper)
+FIXPPOPolicy = rl_policy_factory(fixppo_wrapper.PPOWrapper)
 
 import torch
 from open_spiel.python.pytorch.dqn import DQN

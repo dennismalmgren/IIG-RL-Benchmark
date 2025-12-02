@@ -38,66 +38,6 @@ def apply_action_mask(logits, legal_actions_mask, mask_value):
 
 
 # ---------- entmax / sparsemax (with safe fallbacks) ----------
-import torch.nn.functional as F
-def tau_face_mask_from_logits(
-    logits: torch.Tensor,
-    tau: float,
-    legal_mask: torch.Tensor | None = None,
-    dim: int = -1,
-    mask_value: float = -1e9,
-):
-    """
-    Build a τ-face mask on the last dimension:
-      - compute q = softmax(logits) (respecting legal_mask),
-      - keep the largest prefix (in descending q) such that
-          min_{i in S} q_i / sum_{j in S} q_j >= tau,
-      - return (mask, p_proj) where p_proj ∝ q on that face.
-
-    Shapes:
-      logits: [..., K]
-      legal_mask (optional): [..., K] bool
-      returns:
-        mask: [..., K] bool
-        p_proj: [..., K] float (0 off-face; renormalized q on-face)
-    """
-    assert dim == -1, "This implementation assumes actions on the last dim."
-
-    if legal_mask is not None:
-        logits = torch.where(legal_mask, logits, mask_value)
-
-    # q: [..., K]
-    q = F.softmax(logits, dim=-1)
-
-    # sort descending along last dim
-    q_sorted, idx = torch.sort(q, dim=-1, descending=True)        # [..., K]
-    csum = torch.cumsum(q_sorted, dim=-1)                          # [..., K]
-
-    # feasibility: q_(k) >= tau * sum_{j<=k} q_(j)
-    feasible = q_sorted >= (tau * csum)                            # [..., K]
-
-    # k* = number of True (at least 1)
-    k_star = feasible.sum(dim=-1, keepdim=True).clamp_min(1)       # [..., 1]
-
-    # build prefix mask in sorted order: keep positions < k*
-    K = q.size(-1)
-    pos = torch.arange(K, device=q.device).view(*([1] * (q.dim() - 1)), K)  # [1,...,1,K]
-    mask_sorted = (pos < k_star)                                            # [..., K] bool
-
-    # unsort back to original order using scatter
-    mask = torch.zeros_like(q, dtype=torch.bool)
-    mask = mask.scatter(-1, idx, mask_sorted)                                # [..., K] bool
-
-    # proportion-preserving projection: renormalize q on the face
-    p_proj = torch.where(mask, q, torch.zeros_like(q))
-    p_proj = p_proj / (p_proj.sum(dim=-1, keepdim=True) + 1e-12)
-
-    # re-apply legality and renorm (paranoia)
-    if legal_mask is not None:
-        mask = mask & legal_mask
-        p_proj = torch.where(mask, p_proj, torch.zeros_like(p_proj))
-        p_proj = p_proj / (p_proj.sum(dim=-1, keepdim=True) + 1e-12)
-
-    return mask, p_proj
 
 def _sparsemax(logits, dim=-1):
     """Sparsemax probabilities (Martins & Astudillo, 2016)."""
@@ -221,7 +161,7 @@ class GatedSoftmaxCategorical:
         dim: int = -1,
         legal_mask: torch.Tensor | None = None,
         softmax_temp: float = 1.0,
-        entropy_kind: str = "tsallis",
+        entropy_kind: str = "shannon",
         gate_eps: float = 0.0,
         mask_value: float = -1e9,
     ):
@@ -289,53 +229,6 @@ class GatedSoftmaxCategorical:
             return -(p * p.log()).sum(dim=self.dim)
         return (1.0 - torch.pow(p, a).sum(dim=self.dim)) / (a - 1.0)
 # ------------------------ models ------------------------
-def kl_capped_face_mask_from_logits(
-    logits: torch.Tensor,
-    kl_cap: float,                      # δ ≥ 0; kept mass m = exp(-δ)
-    legal_mask: torch.Tensor | None = None,
-    mask_value: float = -1e9,
-):
-    """
-    Build a boolean face mask S (same shape as logits) that keeps the minimal
-    prefix (by descending prob) whose cumulative prob >= m = exp(-δ).
-    Returns: mask [..., K] and (optional) projected probs p* (q renormed on S).
-    """
-    import math
-    import torch.nn.functional as F
-    
-    if legal_mask is not None:
-        logits = torch.where(legal_mask, logits, torch.full_like(logits, mask_value))
-
-    q = F.softmax(logits, dim=-1)                                 # [..., K]
-    m_keep = float(math.exp(-kl_cap))
-
-    q_sorted, idx = torch.sort(q, dim=-1, descending=True)        # [..., K]
-    csum = torch.cumsum(q_sorted, dim=-1)                         # [..., K]
-    cut = (csum >= m_keep).float().argmax(dim=-1, keepdim=True)   # first True
-
-    K = q.size(-1)
-    pos = torch.arange(K, device=q.device).view(*([1] * (q.dim() - 1)), K)
-    mask_sorted = (pos <= cut)                                    # [..., K] bool
-    mask = torch.zeros_like(q, dtype=torch.bool).scatter(-1, idx, mask_sorted)
-
-    if legal_mask is not None:
-        mask = mask & legal_mask
-
-    # I-projection: renormalize q on S (useful for optional logging/losses)
-    p_proj = torch.where(mask, q, torch.zeros_like(q))
-    p_proj = p_proj / (p_proj.sum(dim=-1, keepdim=True) + 1e-12)
-    return mask, p_proj
-
-def categorical_restricted_softmax(
-    logits: torch.Tensor,
-    support_mask: torch.Tensor,
-    dim: int = -1,
-    mask_value: float = -1e9,
-) -> Categorical:
-    masked_logits = torch.where(
-        support_mask, logits, torch.full_like(logits, mask_value)
-    )
-    return Categorical(logits=masked_logits)
 
 class PPOAgent(nn.Module):
     """Vector-observation PPO agent with entmax head."""
@@ -369,45 +262,35 @@ class PPOAgent(nn.Module):
         return self.critic(x)
 
     def get_action_and_value(
-        self, x, legal_actions_mask=None, action=None, clip_probability_eps=None, 
-        alpha_reg=1.0,
+        self, x, legal_actions_mask=None, action=None, clip_probability_eps=None, alpha_reg=1.0
     ):
         if legal_actions_mask is None:
             legal_actions_mask = torch.ones((len(x), self.num_actions)).bool()
 
         logits = self.actor(x)
+        #logits = apply_action_mask(logits, legal_actions_mask, self.mask_value)
 
-        #
+        #dist = EntmaxCategorical(logits=logits, alpha=self.entmax_alpha * alpha_reg, dim=-1)
+        dist = GatedSoftmaxCategorical(
+            logits=logits,
+            alpha=self.entmax_alpha * alpha_reg,  # raise from 1.0 -> target in last 10%
+            legal_mask=legal_actions_mask,
+            entropy_kind="shannon",               # or "shannon"
+            softmax_temp=1.0,                     # no temp needed; keep 1.0
+            gate_eps=0.0,                         # exact entmax support
+            mask_value=-1e9,
+        )
 
-        # if alpha_reg is not None:
-        #     logits = apply_action_mask(logits, legal_actions_mask, self.mask_value)
-        #     #dist = EntmaxCategorical(logits=logits, alpha=alpha_reg)
-        #     dist = GatedSoftmaxCategorical(logits=logits, alpha=alpha_reg)
-        # elif clip_probability_eps is not None:
-        #     # τ-face (I-projection) mask chosen in probability space
-        #     face_mask, _ = tau_face_mask_from_logits(
-        #         logits, tau=clip_probability_eps, legal_mask=legal_actions_mask, dim=-1
+        # optional probability clipping (keeps distribution valid)
+        # if clip_probability_eps is not None:
+        #     p = dist.probs
+        #     keep = (p >= clip_probability_eps).detach()
+        #     p_masked = p * keep
+        #     has_any = (p_masked.sum(dim=-1, keepdim=True) > 0)
+        #     p = torch.where(
+        #         has_any, p_masked / (p_masked.sum(dim=-1, keepdim=True) + 1e-12), p
         #     )
-        #     # restricted softmax on the chosen face (exact zeros off-face)
-        #     masked_logits = torch.where(
-        #         face_mask, logits, self.mask_value
-        #     )
-        #     dist = Categorical(logits=masked_logits)
-        # else:
-        logits = apply_action_mask(logits, legal_actions_mask, self.mask_value)
-        dist = Categorical(logits=logits)
-        
-        ## original version
-        # dist = Categorical(logits=logits)
-        if clip_probability_eps is not None:
-            p = dist.probs
-            keep = (p >= clip_probability_eps).detach()
-            p_masked = p * keep
-            has_any = (p_masked.sum(dim=-1, keepdim=True) > 0)
-            p = torch.where(
-                has_any, p_masked / (p_masked.sum(dim=-1, keepdim=True) + 1e-12), p
-            )
-            dist = Categorical(probs=p)
+        #     dist = EntmaxCategorical(probs=p, alpha=self.entmax_alpha * alpha_reg, dim=-1)
 
         if action is None:
             action = dist.sample()
@@ -448,26 +331,34 @@ class PPOAtariAgent(nn.Module):
         return self.critic(self.network(x / 255.0))
 
     def get_action_and_value(
-        self, x, legal_actions_mask=None, action=None, clip_probability_eps=None, 
-        alpha_reg=1.0
+        self, x, legal_actions_mask=None, action=None, clip_probability_eps=None, alpha_reg=1.0
     ):
         if legal_actions_mask is None:
             legal_actions_mask = torch.ones((len(x), self.num_actions)).bool()
 
         hidden = self.network(x / 255.0)
         logits = self.actor(hidden)
-        logits = apply_action_mask(logits, legal_actions_mask, self.mask_value)
+        #logits = apply_action_mask(logits, legal_actions_mask, self.mask_value)
 
-        dist = Categorical(logits=logits)
-        if clip_probability_eps is not None:
-            p = dist.probs
-            keep = (p >= clip_probability_eps).detach()
-            p_masked = p * keep
-            has_any = (p_masked.sum(dim=-1, keepdim=True) > 0)
-            p = torch.where(
-                has_any, p_masked / (p_masked.sum(dim=-1, keepdim=True) + 1e-12), p
-            )
-            dist = Categorical(probs=p)
+        #dist = EntmaxCategorical(logits=logits, alpha=self.entmax_alpha * alpha_reg, dim=-1)
+        dist = GatedSoftmaxCategorical(
+            logits=logits,
+            alpha=self.entmax_alpha * alpha_reg,  # raise from 1.0 -> target in last 10%
+            legal_mask=legal_actions_mask,
+            entropy_kind="shannon",               # or "shannon"
+            softmax_temp=1.0,                     # no temp needed; keep 1.0
+            gate_eps=0.0,                         # exact entmax support
+            mask_value=-1e9,
+        )
+        # if clip_probability_eps is not None:
+        #     p = dist.probs
+        #     keep = (p >= clip_probability_eps).detach()
+        #     p_masked = p * keep
+        #     has_any = (p_masked.sum(dim=-1, keepdim=True) > 0)
+        #     p = torch.where(
+        #         has_any, p_masked / (p_masked.sum(dim=-1, keepdim=True) + 1e-12), p
+        #     )
+        #     dist = EntmaxCategorical(probs=p, alpha=self.entmax_alpha * alpha_reg, dim=-1)
 
         if action is None:
             action = dist.sample()
@@ -519,7 +410,7 @@ class PPO(nn.Module):
         max_grad_norm=0.5,
         target_kl=None,
         device="cpu",
-        agent_fn=PPOAgent,
+        agent_fn=PPOAtariAgent,
         log_file=None,
         entmax_alpha=1.0,         # <---- NEW: α for entmax (2.0==sparsemax)
         **kwargs,
@@ -584,12 +475,7 @@ class PPO(nn.Module):
         self.start_time = time.time()
         self.prob_clip_eps = None
         self.entropy_reg = 1.0
-        self.anneal_alpha(0, 10_000_000)
-        self.support_mask = torch.zeros(
-            (self.steps_per_batch, self.num_envs, self.num_actions),
-            dtype=torch.bool, device=self.device
-        )
-        self.kl_cap = 0.0  # set >0 only in last phase
+        self.alpha_reg = 1.0001
 
     def get_value(self, x):
         return self.network.get_value(x)
@@ -635,17 +521,7 @@ class PPO(nn.Module):
                 action, logprob, _, value, probs = self.get_action_and_value(
                     obs, legal_actions_mask=legal_actions_mask
                 )
-                if self.kl_cap > 0.0:
-                    # build kl-capped face mask
-                    face_mask, _ = kl_capped_face_mask_from_logits(
-                        self.network.actor(obs),
-                        kl_cap=self.kl_cap,
-                        legal_mask=legal_actions_mask,
-                        mask_value=self.network.mask_value,
-                    )
-                else:
-                    face_mask = legal_actions_mask
-            
+
                 # store
                 self.legal_actions_mask[self.cur_batch_idx] = legal_actions_mask
                 self.obs[self.cur_batch_idx] = obs
@@ -653,7 +529,6 @@ class PPO(nn.Module):
                 self.logprobs[self.cur_batch_idx] = logprob
                 self.values[self.cur_batch_idx] = value.flatten()
                 self.current_players[self.cur_batch_idx] = current_players
-                self.support_mask[self.cur_batch_idx] = face_mask
 
                 return [StepOutput(action=a.item(), probs=p) for (a, p) in zip(action, probs)]
 
@@ -701,7 +576,6 @@ class PPO(nn.Module):
         b_values = self.values.reshape(-1)
         b_playersigns = -2.0 * self.current_players.reshape(-1) + 1.0
         b_advantages *= b_playersigns
-        b_support_mask = self.support_mask.reshape((-1, self.num_actions))
 
         # optimize
         b_inds = np.arange(self.batch_size)
@@ -712,29 +586,11 @@ class PPO(nn.Module):
                 end = start + self.minibatch_size
                 mb_inds = b_inds[start:end]
 
-                # NEW (ENTMAX)
-                # new_logits = self.network.actor(b_obs[mb_inds])
-                # new_logits = apply_action_mask(new_logits, b_legal_actions_mask[mb_inds], self.network.mask_value)
-                #  # REUSE the stored face: restricted softmax on that face
-                # dist_new = categorical_restricted_softmax(new_logits, b_support_mask[mb_inds], mask_value=self.network.mask_value)
-                # newlogprob = dist_new.log_prob(b_actions.long()[mb_inds])
-                # entropy    = dist_new.entropy()
-                # _, _, _, newvalue, _ = self.get_action_and_value(
-                #     b_obs[mb_inds],
-                #     legal_actions_mask=b_legal_actions_mask[mb_inds],
-                #     action=b_actions.long()[mb_inds],
-                # )
-                # END NEW (ENTMAX)
-
-                # OLD (VANILLA)
-
                 _, newlogprob, entropy, newvalue, _ = self.get_action_and_value(
                     b_obs[mb_inds],
                     legal_actions_mask=b_legal_actions_mask[mb_inds],
                     action=b_actions.long()[mb_inds],
                 )
-                # END OLD (VANILLA)
-
                 logratio = newlogprob - b_logprobs[mb_inds]
                 ratio = logratio.exp()
 
@@ -752,8 +608,6 @@ class PPO(nn.Module):
                 pg_loss2 = -mb_advantages * torch.clamp(ratio, 1 - self.clip_coef, 1 + self.clip_coef)
                 pg_loss = torch.max(pg_loss1, pg_loss2).mean()
 
-                # alignment loss
-                
                 # value loss
                 newvalue = newvalue.view(-1)
                 if self.clip_vloss:
@@ -789,16 +643,10 @@ class PPO(nn.Module):
     # -------- misc --------
 
     def save(self, path):
-        torch.save(self.state_dict(), path)
+        torch.save(self.network.actor.state_dict(), path)
 
     def load(self, path):
-        self.load_state_dict(torch.load(path, weights_only=True))
-
-    def save_optimizer(self, path):
-        torch.save(self.optimizer.state_dict(), path)
-
-    def load_optimizer(self, path):
-        self.optimizer.load_state_dict(torch.load(path, weights_only=True))
+        self.network.actor.load_state_dict(torch.load(path))
 
     def anneal_learning_rate(self, update, num_total_updates):
         frac = max(0, 1.0 - (update / num_total_updates))
@@ -807,15 +655,13 @@ class PPO(nn.Module):
         self.optimizer.param_groups[0]["lr"] = frac * self.learning_rate
 
     def anneal_alpha(self, update, num_total_updates):
-#        self.alpha_reg = 1.1101 if update / num_total_updates >= 0.9 else 1.0001
-        start_update = 1
-        #start_update = 9 * (num_total_updates // 10)
-        delta = max(0, update - start_update)
-        tot = max(1, num_total_updates - start_update)
+        self.alpha_reg = 1.1101 if update / num_total_updates >= 0.9 else 1.0001
+        # start_update = 9 * (num_total_updates // 10)
+        # delta = max(0, update - start_update)
+        # tot = max(1, num_total_updates - start_update)
         # # increase alpha from 1.0001 to 1.1 over last 10
 
-        self.alpha_reg = 1.0001 + 0.001 * (delta / tot)
-        #self.alpha_reg = 1.003
+        # self.alpha_reg = 1.0001 + 0.1 * (delta / tot)
 
     def anneal_prob_clip(self, update, num_total_updates):
         start_update = 9 * (num_total_updates // 10)
@@ -823,12 +669,8 @@ class PPO(nn.Module):
         tot = max(1, num_total_updates - start_update)
 
 #        self.prob_clip_eps = 1e-2 if update / num_total_updates >= 0.6 else None
-        #self.prob_clip_eps = 0.0001 if update / num_total_updates >= 0.5 else None
+        #self.prob_clip_eps = 0.001  if update / num_total_updates >= 0.9 else None
         self.prob_clip_eps = None  # <--- disable for now
-        if update > start_update:
-            self.prob_clip_eps = 0.0001
-
-        #self.prob_clip_eps = 0.01  # <--- disable for now
 
     def anneal_entropy_reg(self, update, num_total_updates):
         entropy_reg = 1.0
@@ -836,13 +678,3 @@ class PPO(nn.Module):
         #     delta = ((update / num_total_updates) - 0.4) / 0.6
         #     entropy_reg = 1.0 - delta
         self.entropy_reg = entropy_reg
-
-    def anneal_kl_cap(self, update, num_total_updates):
-        pass
-        # last 10%: δ ramps 0 -> 0.015 (kept mass m ≈ 0.985)
-        frac = update / max(1, num_total_updates)
-        if frac < 0.90:
-            self.kl_cap = 0.0
-        else:
-            u = (frac - 0.90) / 0.10
-            self.kl_cap = 0.015 * u

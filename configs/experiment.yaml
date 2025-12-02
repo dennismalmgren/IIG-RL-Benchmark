@@ -2,7 +2,8 @@ defaults:
   - _self_
   - algorithm: ppo  # algorithm to use for training
 seed: 0  # seed for random, torch, numpy
-max_steps: 10_000_000  # number of training steps
+#max_steps: 10_000_000  # number of training steps
+max_steps: 0  # number of training steps
 game: classical_phantom_ttt  # game to train on (see list in main.py)
 save_dir: 'results'  # top level saving directory
 group_name: 'test'  # name of the folder this experiment will be in

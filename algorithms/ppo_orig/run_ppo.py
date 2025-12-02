@@ -104,27 +104,11 @@ class RunPPO:
             agent_fn=self.agent_fn,
             log_file=os.path.join(self.meta_config.experiment_dir, 'train_log.csv'),
         )
-        
-        #default, not-loaded
-        update = -1
-        cp_step = 0
-        load_step = 0
-        # --- LOAD CHECKPOINT ---
-#  8500224
-#        9000960
-#      9500672
-        load_step = 8500224
-        experiment_folder = "./results/test/ppo/classical_phantom_ttt/2025-12-01_20-10-58-970947_d20175"
-        self.load_cp(load_step, f"{experiment_folder}/{load_step}/agent.pth",
-                     f"{experiment_folder}/{load_step}/optimizer.pth")
-        update = load_step // batch_size
-        num_cp_updates = self.agent.total_steps_done // self.meta_config.compute_exploitability_every
-        cp_step = num_cp_updates * self.meta_config.compute_exploitability_every
-        print("--- Loaded checkpoint at step", load_step)
-        print("--- Last exploitability computed at step", cp_step)
-        # -----------------------
+
         time_steps = envs.reset()
+        cp_step = 0
         t0 = time.time()
+        update = -1
         computed_safety_expl = False
         while self.agent.total_steps_done < self.meta_config.max_steps:
             update += 1
@@ -144,7 +128,6 @@ class RunPPO:
             self.agent.anneal_prob_clip(update, num_updates)
             self.agent.anneal_entropy_reg(update, num_updates)
             self.agent.anneal_alpha(update, num_updates)
-            self.agent.anneal_kl_cap(update, num_updates)
             self.agent.learn(time_steps)
 
             if self.agent.total_steps_done > cp_step + self.meta_config.compute_exploitability_every:
@@ -153,16 +136,14 @@ class RunPPO:
                     self.expl_callback(
                         self.get_model(), self.get_model(), self.agent.total_steps_done
                     )
-                os.makedirs(f"{self.meta_config.experiment_dir}/{self.agent.total_steps_done}", exist_ok=True)
-                self.agent.save(f"{self.meta_config.experiment_dir}/{self.agent.total_steps_done}/agent.pth")
-                self.agent.save_optimizer(f"{self.meta_config.experiment_dir}/{self.agent.total_steps_done}/optimizer.pth")
+                self.agent.save(f"{self.meta_config.experiment_dir}/agent.pth")
 
             if update % self.config.eval_every == 0:
                 time_elapsed = time.time() - t0
                 time_remaining_est = (
                     (self.meta_config.max_steps - self.agent.total_steps_done)
                     * time_elapsed
-                    / (self.agent.total_steps_done - load_step)
+                    / self.agent.total_steps_done
                 )
                 print(
                     f"step {self.agent.total_steps_done}/{self.meta_config.max_steps} ; elapsed: {time_elapsed/60:.1f}min ; remaining: {time_remaining_est/60:.1f}min"
@@ -180,7 +161,7 @@ class RunPPO:
     def current_step(self):
         return self.agent.total_steps_done
 
-    def load_cp(self, steps_done, cp_path, optimizer_cp_path):
+    def load_cp(self, cp_path):
         print("loading checkpoint from", cp_path)
 
         device = torch.device(
@@ -192,13 +173,8 @@ class RunPPO:
             observation_shape=self.game.information_state_tensor_shape(),
             device=device,
         ).to(device)
-        self.agent.total_steps_done = steps_done
 
-        self.agent.load_state_dict(torch.load(cp_path, weights_only=True))
-        #self.agent.optimizer = torch.optim.Adam(self.agent.parameters(), lr=self.agent.learning_rate, eps=1e-5)
-        self.agent.optimizer.load_state_dict(torch.load(optimizer_cp_path, weights_only=True))
-        #self.agent.network = self.network
-        self.network = self.agent.network
+        self.network.actor.load_state_dict(torch.load(cp_path))
 
     def wrap_rl_agent(self, *args, **kwargs):
         class PPORLAgent(rl_agent.AbstractAgent):

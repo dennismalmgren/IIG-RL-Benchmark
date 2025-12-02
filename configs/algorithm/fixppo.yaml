@@ -1,0 +1,26 @@
+algorithm_name: fixppo  # Name of the algorithm
+learning_rate: 0.00025  # the learning rate of the optimizer
+eval_every: 10  # evaluate the policy every N updates
+cuda: false  # if toggled, cuda will be enabled by default
+num_envs: 8  # the number of parallel game environments
+num_steps: 128  # the number of steps to run in each environment per policy rollout (batch size is num_steps * num_envs)
+anneal_lr: true  # Toggle learning rate annealing for policy and value networks
+gae: true  # Use GAE for advantage computation
+gamma: 0.99  # the discount factor gamma
+gae_lambda: 0.95  # the lambda for the general advantage estimation
+num_minibatches: 4  # the number of mini-batches
+update_epochs: 4  # the K epochs to update the policy
+norm_adv: true  # Toggles advantages normalization
+clip_coef: 0.1  # the surrogate clipping coefficient
+clip_vloss: true  # Toggles whether or not to use a clipped loss for the value function, as per the paper
+ent_coef: 0.1  # coefficient of the entropy
+vf_coef: 0.5  # coefficient of the value function
+max_grad_norm: 0.5  # the maximum norm for the gradient clipping
+target_kl: 0.01  # the target KL divergence threshold
+#FixPO arguments
+kl_target: 0.01
+kl_tolerance: 0.10  # the target KL divergence threshold
+kl_beta_init: 1.0
+kl_beta_lr: 1e-3
+max_fixup_epochs: 10
+seed: 42

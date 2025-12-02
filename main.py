@@ -75,7 +75,7 @@ def main(cfg: DictConfig):
     # checks
     assert cfg.game in list(OPENSPIEL_GAMES.keys())
     assert cfg.compute_exploitability in [True, False]
-
+    print(f"Seed: {cfg.seed}")
     # seed
     set_seed(cfg.seed)
 
@@ -129,6 +129,8 @@ def main(cfg: DictConfig):
     print("Loading runner")
     algorithm = cfg.algorithm.algorithm_name
     runner = get_runner_cls(algorithm)(cfg, game, compute_exploitability_callback)
+    
+    
 
     # start memory logging thread
     memory_usage_file_path = os.path.join(cfg.experiment_dir, "memory_usage.log")

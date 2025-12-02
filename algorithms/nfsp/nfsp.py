@@ -33,6 +33,8 @@ from open_spiel.python import rl_agent
 from open_spiel.python.pytorch import dqn
 from algorithms.ppo.ppo_wrapper import PPOWrapper
 from algorithms.ppo.ppo import PPOAgent
+from algorithms.fixppo.fixppo_wrapper import FIXPPOWrapper
+from algorithms.fixppo.fixppo import FIXPPOAgent
 
 Transition = collections.namedtuple(
     "Transition", "info_state action_probs legal_actions_mask"
@@ -105,6 +107,15 @@ class NFSP(rl_agent.AbstractAgent):
                 player_id, state_representation_size, num_actions, **ppo_hparams
             )
             self._rl_agent.anneal_lr = True
+        elif self._inner_rl_agent_type == "fixppo":
+            fixppo_hparams = {
+                "use_wandb": False,
+                "agent_fn": FIXPPOAgent,
+                **inner_rl_agent_args,
+            }
+            self._rl_agent = FIXPPOWrapper(
+                player_id, state_representation_size, num_actions, **fixppo_hparams
+            )
         else:
             raise ValueError("Not implemented. Choose from ['dqn', 'ppo'].")
 

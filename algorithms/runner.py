@@ -25,6 +25,11 @@ def get_runner_cls(algorithm):
 
         return RunPPO
 
+    if algorithm == "fixppo":
+        from algorithms.fixppo.run_fixppo import RunFIXPPO
+
+        return RunFIXPPO
+    
     if algorithm == "mmd":
         from algorithms.mmd.run_mmd import RunMMD
 
